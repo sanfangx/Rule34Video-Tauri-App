@@ -6,9 +6,9 @@ This document provides detailed instructions for AI agents working on the Rule34
 
 ### Current release
 
-- Version: v1.0.2
-- Date: 2026-05-09
-- Summary: Bug fixes and polish updates.
+- Version: v1.0.4
+- Date: 2026-05-18
+- Summary: Bug fixes and adblock improvements.
 ## 🏗️ Architecture Guidelines
 
 ### Tauri V2 Standards
@@ -22,46 +22,59 @@ This document provides detailed instructions for AI agents working on the Rule34
 ### Code Organization
 - `src-tauri/`: Contains platform-specific configuration and build scripts (single source for all platforms)
 - `src-tauri/src/lib.rs`: Main application entry point and setup for desktop and mobile (desktop features plus `#[tauri::mobile_entry_point]` support)
-- Feature modules: Each major feature gets its own file in `src-tauri/src/ext/` (adblock.rs, downloads.rs, etc.)
+- Feature modules: Each major feature gets its own file in `src-tauri/src/ext/` (adblock.rs, webview_intercept.rs, downloads.rs, etc.)
 - Shared logic: Put in `src-tauri/src/ext/` or create new shared modules as needed
 - Platform-specific UI features: Tray, child windows, and global shortcuts are desktop-only
+- Platform-specific request interception: `webview_intercept.rs` is Windows-only via `#[cfg(windows)]`
+
+### Adblock Architecture
+- **Dual-layer approach**: Combines a Rust-native `adblock-rust` engine (Brave's library, v0.12) with JS injection for webview resource blocking.
+- **Engine**: `AdblockManager` wraps `adblock::engine::Engine` inside `Mutex<Engine>` with `unsafe impl Send+Sync` (Engine uses `Rc`/`RefCell` internally; Mutex ensures single-threaded access, making it safe to share across threads).
+- **Bundled rules** (`adblock_bundled.txt`): ~900 rules compiled into the binary via `include_str!` so the engine is never empty on first launch.
+- **Runtime updates**: Asynchronously downloads AdGuard Base + Tracking Protection lists on startup, stores a serialized engine cache (`engine_cache.bin`) for fast subsequent loads.
+- **Filter syntax**: Uses Adblock Plus / uBlock Origin syntax (`||domain.com^$third-party`, `rule34video.com##.ad-class` for cosmetic hiding).
+- **On-navigation blocking**: `on_navigation()` callback blocks top-level navigations to ad/document URLs via the engine.
+- **Native resource interception** (`webview_intercept.rs`, Windows-only): Uses WebView2's `ICoreWebView2.AddWebResourceRequestedFilter` + `add_WebResourceRequested` COM events to intercept ALL sub-resource HTTP requests (scripts, images, media, XHR, etc.) at the native level, before the browser processes them. This is the only reliable way to block `<script src="...">` tags parsed from raw HTML — JS injection alone cannot catch these.
+- **JS injection** (`adblock_script()`): Fallback for dynamically created elements. Includes fetch/XHR interception, `createElement` src descriptor for media/script elements, lightweight MutationObserver (per-element check, no querySelectorAll), immediate CSS hiding, and single cosmetic filter load on page idle. No `setAttribute` override, no `data-src` interception, no 5-second setInterval — those caused freezes.
+- **Performance**: The JS injection is intentionally minimal to avoid freezing. Heavy interception mechanisms (setAttribute override, querySelectorAll in MutationObserver, constant IPC polling) were removed after they caused app freezes from DOM mutation overhead.
+- **Platform-specific `webview_intercept`**: Only enabled on Windows via `#[cfg(windows)]`. On other platforms, JS injection + `on_navigation` are the only blockers.
+- **Debugging tip**: If ads still show, check whether they're loaded via HTML-parsed `<script src>` tags (need WebView2 interception to block) vs dynamically created elements (need JS injection + engine rules). Add the ad URL/domain to `adblock_bundled.txt` if it's not caught.
 
 ## 🔧 Development Workflow
 
 ### Setting Up
 ```bash
 # Clone repository
-git clone https://github.com/your-username/virtual-customs-tauri-app.git
-cd virtual-customs-tauri-app
+git clone https://github.com/PhantomNimbi/Rule34Video-Tauri-App.git
+cd Rule34Video-Tauri-App
 
-# Desktop development (example for Windows)
-# Development is done from the project root
+# Install Tauri CLI
+cargo install tauri-cli --version "^2" --locked
+
+# Desktop development
 cargo tauri dev
 
 # Android development
-# Development is done from the project root with target specification
 cargo tauri dev --target <android-target>
 
 # iOS development
-# Development is done from the project root with target specification
 cargo tauri dev --target <ios-target>
 
 # For release builds (desktop)
 cargo tauri build
 
 # For release builds (mobile)
-# Build for specific targets from the project root
-# cargo tauri build --target <target-triple>
+cargo tauri build --target <target-triple>
 ```
 
 ### Making Changes
 1. Create a descriptive branch: `git checkout -b feat/your-feature-name`
 2. Make focused changes following existing code style
-3. Update documentation if your change affects documented behavior
-4. When changing packaging or package manager support, update `docs/Installation.md`, `.github/docs/Installation.md`, and any related platform docs
+3. Update documentation if your change affects documented behavior — the project has a `docs/` directory with five pages (`index.md`, `architecture.md`, `adblock.md`, `features.md`, `development.md`)
+4. When adding or modifying features, update the relevant `docs/*.md` page(s) to keep them in sync
 5. Test thoroughly on target platforms
 6. Commit using Conventional Commits format
-6. Open pull request against main branch
+7. Open pull request against main branch
 
 ## 🚀 Release Automation
 - AI agents should publish a new GitHub release for the repository on every push to `main` when a version or release-worthy change is present.
@@ -126,6 +139,7 @@ cargo tauri build
 - Use Tauri's built-in security features (CSP, etc.)
 - Be careful with deep link handling
 - Validate all data coming from the webview
+- When accessing the native WebView2 COM API (`ICoreWebView2`), always use `unsafe` blocks and handle `Result` errors gracefully — COM calls can fail if the webview is not fully initialized
 
 ### Performance
 - Don't block the UI thread with long-running operations

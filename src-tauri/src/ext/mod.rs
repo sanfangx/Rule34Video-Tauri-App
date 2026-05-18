@@ -11,6 +11,7 @@ pub mod navigation;
 pub mod universal_deep_link;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod webnotifications;
+pub mod webview_intercept;
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod global_shortcuts;

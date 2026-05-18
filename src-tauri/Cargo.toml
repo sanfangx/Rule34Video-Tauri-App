@@ -1,6 +1,6 @@
 [package]
 name = "rule34video"
-version = "1.0.3"
+version = "1.0.4"
 description = "Customize your Virtual World!"
 authors = ["The Back Room"]
 edition = "2021"
@@ -28,3 +28,8 @@ tauri-plugin-shell = ">=2.2.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
+adblock = "0.12"
+reqwest = "0.12"
+webview2-com = "0.38"
+windows = { version = "0.61", default-features = false, features = ["Win32_System_Com"] }
+windows-core = "0.61"

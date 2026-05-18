@@ -1,238 +1,284 @@
-/// A curated list of known ad-network and tracker hostnames to block.
-///
-/// This list is intentionally kept to a manageable size of well-known,
-/// unambiguously-ad/tracking-only domains.  It is the **single source of
-/// truth** used by both:
-///   • the Rust navigation handler (`is_blocked_url`), and
-///   • the JavaScript injection (`adblock_script`).
-pub const BLOCKED_DOMAINS: &[&str] = &[
-    // Google advertising
-    "doubleclick.net",
-    "googlesyndication.com",
-    "googleadservices.com",
-    "adservice.google.com",
-    "pagead2.googlesyndication.com",
-    // Amazon advertising
-    "aax.amazon-adsystem.com",
-    "amazon-adsystem.com",
-    // Social-media ad networks
-    "an.facebook.com",
-    "connect.facebook.net",
-    "ads.twitter.com",
-    "ads.linkedin.com",
-    "platform.linkedin.com",
-    // Programmatic / RTB networks
-    "advertising.com",
-    "adnxs.com",
-    "adsrvr.org",
-    "rubiconproject.com",
-    "pubmatic.com",
-    "openx.net",
-    "casalemedia.com",
-    "criteo.com",
-    "criteo.net",
-    "tapad.com",
-    "eyeota.net",
-    "bidswitch.net",
-    "bidswitch.com",
-    "thetradedesk.com",
-    "smartadserver.com",
-    "moatads.com",
-    "moat.com",
-    "appnexus.com",
-    "contextweb.com",
-    "lkqd.net",
-    "indexww.com",
-    "33across.com",
-    "sovrn.com",
-    "lijit.com",
-    "spotxchange.com",
-    "spotx.tv",
-    "undertone.com",
-    "exponential.com",
-    "tribalfusion.com",
-    "yieldmanager.com",
-    // Native-ad / content-recommendation networks
-    "outbrain.com",
-    "taboola.com",
-    "revcontent.com",
-    "zergnet.com",
-    // Analytics / behavioural trackers
-    "hotjar.com",
-    "fullstory.com",
-    "mixpanel.com",
-    "amplitude.com",
-    "segment.com",
-    "segment.io",
-    "quantserve.com",
-    "scorecardresearch.com",
-    "chartbeat.com",
-    "clicktale.net",
-    "crazyegg.com",
-    // Social-sharing widgets (tracking component)
-    "addthis.com",
-    "sharethis.com",
-];
+use adblock::engine::Engine;
+use adblock::lists::{FilterSet, ParseOptions};
+use adblock::request::Request;
+use std::sync::Mutex;
+use tauri::{AppHandle, Manager};
 
-/// Returns `true` when the supplied URL string belongs to a blocked domain.
-///
-/// Both exact matches (`doubleclick.net`) and sub-domain matches
-/// (`x.doubleclick.net`, `x.y.doubleclick.net`) are caught.
-pub fn is_blocked_url(url: &str) -> bool {
-    let hostname = extract_hostname(url);
-    BLOCKED_DOMAINS
-        .iter()
-        .any(|&blocked| matches_hostname(&hostname, blocked))
+const ADGUARD_BASE_URL: &str = "https://filters.adtidy.org/windows/filters/2.txt";
+const ADGUARD_TRACKING_URL: &str = "https://filters.adtidy.org/windows/filters/3.txt";
+
+const FILTERS_DIR: &str = "adblock-filters";
+const ENGINE_CACHE: &str = "engine_cache.bin";
+
+const BUNDLED_RULES: &str = include_str!("./adblock_bundled.txt");
+
+pub struct AdblockManager {
+    engine: Mutex<Engine>,
 }
 
-/// Returns `true` iff `hostname` is exactly `blocked` or is a sub-domain of it.
-/// No heap allocation is performed.
-fn matches_hostname(hostname: &str, blocked: &str) -> bool {
-    hostname == blocked
-        || hostname
-            .strip_suffix(blocked)
-            .is_some_and(|prefix| prefix.ends_with('.'))
-}
+unsafe impl Send for AdblockManager {}
+unsafe impl Sync for AdblockManager {}
 
-fn extract_hostname(url: &str) -> String {
-    // Use the `url` crate for robust parsing (handles IPv6, userinfo, etc.).
-    if let Ok(parsed) = url::Url::parse(url) {
-        if let Some(host) = parsed.host_str() {
-            return host.to_lowercase();
+impl AdblockManager {
+    pub fn new_with_bundled() -> Self {
+        let mut filter_set = FilterSet::new(false);
+        filter_set.add_filter_list(BUNDLED_RULES, ParseOptions::default());
+        let engine = Engine::from_filter_set(filter_set, true);
+        Self {
+            engine: Mutex::new(engine),
         }
     }
-    // Fallback: simple string slicing for scheme-less or malformed inputs.
-    let without_scheme = url.find("://").map_or(url, |pos| &url[pos + 3..]);
-    let without_path = without_scheme.split('/').next().unwrap_or(without_scheme);
-    let without_port = without_path.split(':').next().unwrap_or(without_path);
-    without_port.to_lowercase()
+
+    pub async fn load_filters(&self, app: &AppHandle) {
+        let data_dir = match app.path().app_data_dir() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+
+        let cache_path = data_dir.join(ENGINE_CACHE);
+
+        if let Ok(data) = std::fs::read(&cache_path) {
+            let mut engine = Engine::default();
+            if engine.deserialize(&data).is_ok() {
+                let mut current = self.engine.lock().unwrap();
+                *current = engine;
+                return;
+            }
+        }
+
+        let filters_dir = data_dir.join(FILTERS_DIR);
+        let _ = std::fs::create_dir_all(&filters_dir);
+
+        let base_result = download_list(ADGUARD_BASE_URL).await;
+        let tracking_result = download_list(ADGUARD_TRACKING_URL).await;
+
+        if let Ok(ref content) = base_result {
+            let _ = std::fs::write(filters_dir.join("adguard_base.txt"), content);
+        }
+        if let Ok(ref content) = tracking_result {
+            let _ = std::fs::write(filters_dir.join("adguard_tracking.txt"), content);
+        }
+
+        let mut filter_set = FilterSet::new(false);
+        filter_set.add_filter_list(BUNDLED_RULES, ParseOptions::default());
+        if let Ok(ref content) = base_result {
+            filter_set.add_filter_list(content, ParseOptions::default());
+        }
+        if let Ok(ref content) = tracking_result {
+            filter_set.add_filter_list(content, ParseOptions::default());
+        }
+
+        let engine = Engine::from_filter_set(filter_set, true);
+        let serialized = engine.serialize();
+        let _ = std::fs::write(&cache_path, &serialized);
+
+        let mut current = self.engine.lock().unwrap();
+        *current = engine;
+    }
+
+    pub fn is_blocked(&self, url: &str, source_url: &str, request_type: &str) -> bool {
+        let request = match Request::new(url, source_url, request_type) {
+            Ok(r) => r,
+            Err(_) => return false,
+        };
+        let engine = self.engine.lock().unwrap();
+        let result = engine.check_network_request(&request);
+        result.matched
+    }
+
+    pub fn get_cosmetic_filters(&self, url: &str) -> CosmeticFilters {
+        let engine = self.engine.lock().unwrap();
+        let resources = engine.url_cosmetic_resources(url);
+        CosmeticFilters {
+            hide_selectors: resources.hide_selectors.into_iter().collect(),
+            injected_script: resources.injected_script.clone(),
+            generichide: resources.generichide,
+        }
+    }
 }
 
-/// Returns the JavaScript snippet that should be injected into every page.
-///
-/// Pulling the domain list from the same Rust constant ensures the Rust
-/// navigation-level block and the JS in-page block always stay in sync.
-pub fn adblock_script() -> String {
-    // Build the JS set literal from BLOCKED_DOMAINS
-    let domains_js = BLOCKED_DOMAINS
-        .iter()
-        .map(|d| format!("        \"{d}\""))
-        .collect::<Vec<_>>()
-        .join(",\n");
+#[derive(serde::Serialize)]
+pub struct CosmeticFilters {
+    pub hide_selectors: Vec<String>,
+    pub injected_script: String,
+    pub generichide: bool,
+}
 
-    format!(
-        r#"(function () {{
+async fn download_list(url: &str) -> Result<String, reqwest::Error> {
+    reqwest::get(url).await?.text().await
+}
+
+#[tauri::command]
+pub fn check_url_blocked(
+    state: tauri::State<'_, AdblockManager>,
+    url: String,
+    source_url: String,
+    request_type: String,
+) -> Result<bool, String> {
+    Ok(state.is_blocked(&url, &source_url, &request_type))
+}
+
+#[tauri::command]
+pub fn get_page_cosmetic_filters(
+    state: tauri::State<'_, AdblockManager>,
+    url: String,
+) -> Result<CosmeticFilters, String> {
+    Ok(state.get_cosmetic_filters(&url))
+}
+
+pub fn adblock_script() -> String {
+    r#"(function () {
     'use strict';
 
-    // ---------------------------------------------------------------------------
-    // Domain blocklist (generated from the same list used by the Rust backend)
-    // ---------------------------------------------------------------------------
-    const BLOCKED_DOMAINS = new Set([
-{domains_js}
-    ]);
+    const SITE_ORIGIN = location.origin;
+    var cache = new Map();
 
-    function isBlocked(url) {{
-        if (!url) return false;
-        try {{
-            const hostname = new URL(url, window.location.href).hostname.toLowerCase();
-            for (const domain of BLOCKED_DOMAINS) {{
-                if (hostname === domain || hostname.endsWith('.' + domain)) {{
-                    return true;
-                }}
-            }}
-        }} catch (_) {{}}
-        return false;
-    }}
+    function cacheKey(url, type) { return url + '|' + type; }
 
-    // ---------------------------------------------------------------------------
-    // Block fetch() requests to ad domains
-    // ---------------------------------------------------------------------------
-    const _fetch = window.fetch.bind(window);
-    window.fetch = function (resource, init) {{
-        const url = resource instanceof Request ? resource.url
-                  : typeof resource === 'string'  ? resource
-                  : String(resource);
-        if (isBlocked(url)) {{
-            return Promise.reject(new TypeError('Request blocked by adblock'));
-        }}
-        return _fetch(resource, init);
-    }};
+    function checkViaIpc(url, type) {
+        var key = cacheKey(url, type);
+        if (cache.has(key)) return Promise.resolve(cache.get(key));
+        return window.__TAURI_INTERNALS__.invoke('check_url_blocked', {
+            url: url, sourceUrl: SITE_ORIGIN, requestType: type
+        }).then(function (b) {
+            cache.set(key, b);
+            if (cache.size > 50000) cache.clear();
+            return b;
+        }).catch(function () { return false; });
+    }
 
-    // ---------------------------------------------------------------------------
-    // Block XMLHttpRequest to ad domains
-    // ---------------------------------------------------------------------------
-    const _xhrOpen = XMLHttpRequest.prototype.open;
-    XMLHttpRequest.prototype.open = function (method, url) {{
-        this._adblockBlocked = isBlocked(String(url));
+    function syncCheck(url, type) {
+        var key = cacheKey(url, type);
+        return cache.has(key) ? cache.get(key) : null;
+    }
+
+    function rm(el) {
+        if (el && el.parentNode) try { el.parentNode.removeChild(el); } catch (_) {}
+    }
+
+    var typeMap = { script:'script', iframe:'subdocument', img:'image', video:'media', source:'media', embed:'object', object:'object' };
+    function rtype(tag) { return typeMap[tag] || 'other'; }
+
+    function checkEl(el) {
+        if (!el || el.nodeType !== 1) return;
+        var tag = el.nodeName.toLowerCase();
+        if (tag === 'script' || tag === 'iframe' || tag === 'img' || tag === 'video' || tag === 'source' || tag === 'embed' || tag === 'object') {
+            var src = el.src || el.getAttribute('src') || '';
+            if (src && src.length > 4) {
+                var cached = syncCheck(src, rtype(tag));
+                if (cached === true) { rm(el); return; }
+                if (cached === null) {
+                    (function(e, s, t) {
+                        checkViaIpc(s, t).then(function (b) { if (b) rm(e); });
+                    })(el, src, rtype(tag));
+                }
+            }
+        }
+    }
+
+    var _fetch = window.fetch.bind(window);
+    window.fetch = function (resource, init) {
+        var url;
+        if (typeof resource === 'string') url = resource;
+        else if (resource instanceof Request) url = resource.url;
+        else return _fetch(resource, init);
+        return checkViaIpc(url, 'xmlhttprequest').then(function (b) {
+            return b ? Promise.reject(new TypeError('Blocked')) : _fetch(resource, init);
+        });
+    };
+
+    var _xhrOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function (method, url) {
+        this._abUrl = typeof url === 'string' ? url : '';
         return _xhrOpen.apply(this, arguments);
-    }};
-    const _xhrSend = XMLHttpRequest.prototype.send;
-    XMLHttpRequest.prototype.send = function () {{
-        if (this._adblockBlocked) return;
-        return _xhrSend.apply(this, arguments);
-    }};
+    };
+    var _xhrSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.send = function (body) {
+        if (this._abUrl) {
+            var cached = syncCheck(this._abUrl, 'xmlhttprequest');
+            if (cached === true) { try { this.abort(); } catch (_) {} return; }
+            if (cached === null) {
+                var self = this;
+                checkViaIpc(this._abUrl, 'xmlhttprequest').then(function (b) { if (b) try { self.abort(); } catch (_) {} });
+            }
+        }
+        return _xhrSend.call(this, body);
+    };
 
-    // ---------------------------------------------------------------------------
-    // Block <script>, <iframe>, and <img> elements whose src points to ad domains
-    // ---------------------------------------------------------------------------
-    const _createElement = document.createElement.bind(document);
-    const INTERCEPTED_TAGS = new Set(['script', 'iframe', 'img']);
-
-    document.createElement = function (tag) {{
-        const el = _createElement.apply(document, arguments);
-        if (typeof tag !== 'string' || !INTERCEPTED_TAGS.has(tag.toLowerCase())) {{
-            return el;
-        }}
-        const proto = Object.getPrototypeOf(el);
-        const srcDesc = Object.getOwnPropertyDescriptor(proto, 'src');
-        if (!srcDesc) return el;
-        Object.defineProperty(el, 'src', {{
-            get() {{
-                return srcDesc.get ? srcDesc.get.call(this) : undefined;
-            }},
-            set(val) {{
-                if (!isBlocked(String(val))) {{
-                    if (srcDesc.set) srcDesc.set.call(this, val);
-                }}
-            }},
-            configurable: true,
-        }});
+    var _createEl = document.createElement.bind(document);
+    var SRC_TAGS = { img:1, iframe:1, video:1, source:1, embed:1, object:1 };
+    document.createElement = function (tag) {
+        var el = _createEl.apply(document, arguments);
+        if (typeof tag !== 'string') return el;
+        var lower = tag.toLowerCase();
+        if (!SRC_TAGS[lower]) return el;
+        var proto = Object.getPrototypeOf(el);
+        var desc = Object.getOwnPropertyDescriptor(proto, 'src');
+        if (desc && desc.set) {
+            var nativeSet = desc.set;
+            Object.defineProperty(el, 'src', {
+                get: function () { return desc.get ? desc.get.call(this) : ''; },
+                set: function (val) {
+                    var str = String(val);
+                    var cached = syncCheck(str, rtype(lower));
+                    if (cached === true) return;
+                    if (cached === null) {
+                        checkViaIpc(str, rtype(lower)).then(function (b) { if (!b) nativeSet.call(el, val); });
+                        return;
+                    }
+                    nativeSet.call(el, val);
+                },
+                configurable: true
+            });
+        }
         return el;
-    }};
+    };
 
-    // ---------------------------------------------------------------------------
-    // CSS-based element hiding for common ad containers
-    // ---------------------------------------------------------------------------
-    const AD_SELECTORS = [
-        'ins.adsbygoogle',
-        '.adsbygoogle',
-        '[id^="ad-container"]',
-        '[id^="ads-container"]',
-        '[class*="banner-ad"]',
-        '[class*="ad-banner"]',
-        '[class*="google-ad"]',
-        '[class*="adsense"]',
-        '[id*="google_ads"]',
-        'iframe[src*="doubleclick.net"]',
-        'iframe[src*="googlesyndication.com"]',
-        'iframe[src*="amazon-adsystem.com"]',
-    ].join(', ');
+    var observer = null;
+    function startObs() {
+        if (observer) return;
+        observer = new MutationObserver(function (mutations) {
+            for (var m = 0; m < mutations.length; m++) {
+                var added = mutations[m].addedNodes;
+                if (added) {
+                    for (var i = 0; i < added.length; i++) checkEl(added[i]);
+                }
+            }
+        });
+        observer.observe(document.documentElement, { childList: true, subtree: true });
+    }
+    if (document.body) startObs(); else document.addEventListener('DOMContentLoaded', startObs, { once: true });
 
-    function injectHidingStyle() {{
-        const style = _createElement('style');
-        style.id = '__adblock_hide__';
-        style.textContent = AD_SELECTORS + ' {{ display: none !important; }}';
-        (document.head || document.documentElement).appendChild(style);
-    }}
+    var style = document.createElement('style');
+    style.id = '__ab__';
+    style.textContent = 'ins.adsbygoogle,.adsbygoogle,[id^="ad-"],[class*="ad-"],[id*="google_ads"]{display:none!important}';
+    (document.head || document.documentElement).appendChild(style);
 
-    if (document.readyState === 'loading') {{
-        document.addEventListener('DOMContentLoaded', injectHidingStyle, {{ once: true }});
-    }} else {{
-        injectHidingStyle();
-    }}
-}}());
-"#
-    )
+    function loadCosmetic() {
+        window.__TAURI_INTERNALS__.invoke('get_page_cosmetic_filters', { url: location.href })
+            .then(function (f) {
+                if (f.injected_script) {
+                    try {
+                        var s = document.createElement('script');
+                        s.id = '__ab_scriptlets__';
+                        s.textContent = f.injected_script;
+                        document.head.appendChild(s);
+                    } catch (_) {}
+                }
+                if (f.hide_selectors && f.hide_selectors.length) {
+                    var prev = document.getElementById('__ab_cosmetic__');
+                    if (prev) prev.parentNode.removeChild(prev);
+                    var st = document.createElement('style');
+                    st.id = '__ab_cosmetic__';
+                    st.textContent = f.hide_selectors.join(',\n') + '{display:none!important}';
+                    document.head.appendChild(st);
+                }
+            }).catch(function () {});
+    }
+    if (document.readyState === 'complete') setTimeout(loadCosmetic, 100);
+    else window.addEventListener('load', function () { setTimeout(loadCosmetic, 100); }, { once: true });
+}());
+"#.to_string()
 }
 
 #[cfg(test)]
@@ -240,36 +286,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn blocks_exact_domain() {
-        assert!(is_blocked_url("https://doubleclick.net/ad"));
-    }
-
-    #[test]
-    fn blocks_subdomain() {
-        assert!(is_blocked_url(
-            "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"
-        ));
-    }
-
-    #[test]
-    fn blocks_multi_level_subdomain() {
-        assert!(is_blocked_url("https://ads.eu.doubleclick.net/ad?id=1"));
-    }
-
-    #[test]
-    fn allows_site_domain() {
-        assert!(!is_blocked_url("https://rule34video.com//page"));
-    }
-
-    #[test]
-    fn allows_unrelated_domain() {
-        assert!(!is_blocked_url("https://example.com/file.js"));
-    }
-
-    #[test]
-    fn adblock_script_contains_domains() {
+    fn script_contains_invoke() {
         let script = adblock_script();
-        assert!(script.contains("doubleclick.net"));
-        assert!(script.contains("taboola.com"));
+        assert!(script.contains("check_url_blocked"));
+        assert!(script.contains("get_page_cosmetic_filters"));
+    }
+
+    #[test]
+    fn bundled_file_exists() {
+        assert!(!BUNDLED_RULES.is_empty());
+        assert!(BUNDLED_RULES.contains("doubleclick"));
     }
 }

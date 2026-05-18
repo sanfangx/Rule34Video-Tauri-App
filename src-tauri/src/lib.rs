@@ -1,10 +1,11 @@
 mod ext;
 
+use ext::adblock::AdblockManager;
 use ext::navigation;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 #[cfg(any(target_os = "android", target_os = "ios"))]
-use tauri::{WebviewUrl, WebviewWindowBuilder};
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 #[cfg(any(target_os = "android", target_os = "ios"))]
 use url::Url;
 
@@ -64,6 +65,8 @@ pub fn run() {
             open_child_window_cmd,
             child_post_message_cmd,
             show_native_context_menu_cmd,
+            crate::ext::adblock::check_url_blocked,
+            crate::ext::adblock::get_page_cosmetic_filters,
         ])
         .plugin(tauri_plugin_global_shortcut::Builder::new().build());
 
@@ -79,6 +82,15 @@ pub fn run() {
         .setup(|app| {
             crate::ext::universal_deep_link::init_universal_deep_link(app.handle().clone())?;
 
+            let adblock_manager = AdblockManager::new_with_bundled();
+            app.manage(adblock_manager);
+
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let manager = app_handle.state::<AdblockManager>();
+                manager.load_filters(&app_handle).await;
+            });
+
             let site_url: url::Url = "https://rule34video.com/"
                 .parse()
                 .expect("hardcoded URL is valid");
@@ -92,14 +104,19 @@ pub fn run() {
             let window_builder = window_builder.center();
             let window_builder = crate::ext::cloudfare::init_cloudfare(window_builder);
 
+            let nav_app_handle = app.handle().clone();
             let _window = window_builder
                 .initialization_script(build_init_script())
-                .on_navigation(|url| !crate::ext::adblock::is_blocked_url(url.as_str()))
+                .on_navigation(move |url| {
+                    let state = nav_app_handle.state::<AdblockManager>();
+                    !state.is_blocked(url.as_str(), "", "document")
+                })
                 .on_download(|_window, event| {
                     crate::ext::downloads::handle_download_event(_window.app_handle(), "main", event)
                 })
                 .build()?;
 
+            crate::ext::webview_intercept::setup(&app.handle());
             let _ = crate::ext::context_menu::init_context_menu(&app.handle());
             let _ = crate::ext::downloads::init_downloads(&app.handle());
             let _ = crate::ext::global_shortcuts::init_global_shortcuts(&app.handle());
@@ -116,6 +133,10 @@ pub fn run() {
 #[tauri::mobile_entry_point]
 pub fn run() {
     tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![
+            crate::ext::adblock::check_url_blocked,
+            crate::ext::adblock::get_page_cosmetic_filters,
+        ])
         .plugin(
             tauri_plugin_opener::Builder::new()
                 .open_js_links_on_click(false)
@@ -127,14 +148,27 @@ pub fn run() {
         .setup(|app| {
             crate::ext::universal_deep_link::init_universal_deep_link(app.handle().clone())?;
 
+            let adblock_manager = AdblockManager::new_with_bundled();
+            app.manage(adblock_manager);
+
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let manager = app_handle.state::<AdblockManager>();
+                manager.load_filters(&app_handle).await;
+            });
+
             let site_url: Url = "https://rule34video.com/"
                 .parse()
                 .expect("hardcoded URL is valid");
 
+            let nav_app_handle = app.handle().clone();
             WebviewWindowBuilder::new(app, "main", WebviewUrl::External(site_url))
                 .title("Rule34Video")
-                .initialization_script(format!("{}\n\n{}", "", crate::ext::adblock::adblock_script()))
-                .on_navigation(|url| !crate::ext::adblock::is_blocked_url(url.as_str()))
+                .initialization_script(crate::ext::adblock::adblock_script())
+                .on_navigation(move |url| {
+                    let state = nav_app_handle.state::<AdblockManager>();
+                    !state.is_blocked(url.as_str(), "", "document")
+                })
                 .build()?;
 
             Ok(())
