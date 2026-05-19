@@ -6,7 +6,7 @@
 
 ## 🎯 How it works (bird's eye view)
 
-```
+```sql
          User requests page
                │
                ▼
@@ -20,17 +20,17 @@
      ┌─────────┴───────────┐
      │                     │
      ▼                     ▼
-┌──────────────┐   ┌──────────────┐
-│ Native       │   │ JS Injection │
-│ WebView2     │   │ (fallback)   │
-│ Interception │   │              │
-│ (Windows)    │   │ • fetch/XHR  │
-│              │   │ • createEl   │
-│ Blocks ALL   │   │ • MutationObs│
-│ sub-resource │   │ • CSS hiding │
-│ requests at  │   │ • Cosmetic   │
-│ COM level    │   │   filters    │
-└──────────────┘   └──────────────┘
+┌──────────────┐   ┌───────────────┐
+│ Native       │   │ JS Injection  │
+│ WebView2     │   │ (fallback)    │
+│ Interception │   │               │
+│ (Windows)    │   │ • fetch/XHR   │
+│              │   │ • createEl    │
+│ Blocks ALL   │   │ • MutationObs │
+│ sub-resource │   │ • CSS hiding  │
+│ requests at  │   │ • Cosmetic    │
+│ COM level    │   │   filters     │
+└──────────────┘   └───────────────┘
        │                   │
        ▼                   ▼
    Blocked? ──yes──► 204 No Content
@@ -48,7 +48,7 @@ The engine is **Brave's `adblock-rust`** library (v0.12.5), the same engine that
 
 ### AdblockManager
 
-```rust
+```rs
 pub struct AdblockManager {
     engine: Mutex<Engine>,
 }
@@ -63,7 +63,7 @@ unsafe impl Sync for AdblockManager {}
 
 ### Startup flow
 
-```
+```sql
 App starts
     │
     ▼
@@ -109,7 +109,7 @@ Ads loaded via `<script src="//ad-server.com/ad.js">` in raw HTML **cannot be bl
 
 We use WebView2's COM API directly:
 
-```rust
+```rs
 // Pseudocode — see webview_intercept.rs
 let core: ICoreWebView2 = controller.CoreWebView2()?;
 
@@ -203,7 +203,7 @@ A minimal, performant fallback that runs inside every page:
 
 ### Common ad domains we've already blocked
 
-```
+```sql
 guidepaparazzisurface.com   ← Main ad script server
 spankurbate.com             ← Header text-link ad
 trafficjunky.com            ← Adult ad network
