@@ -8,25 +8,25 @@
 
 The app follows a modular, layered architecture with clear separation between the Tauri shell, the Rust backend, and the webview frontend.
 
-```
-┌─────────────────────────────────────────────┐
-│                  WebView                     │
-│  (rule34video.com + injected JS scripts)    │
-├─────────────────────────────────────────────┤
-│           Tauri Bridge (IPC)                │
-│  check_url_blocked · get_page_cosmetic_     │
-│  open_child_window · postMessage · etc.     │
-├─────────────────────────────────────────────┤
-│              Rust Backend                   │
-│  ┌──────┐ ┌──────────┐ ┌───────────────┐   │
-│  │Adblock│ │Navigation│ │Child Windows  │   │
-│  ├──────┤ ├──────────┤ ├───────────────┤   │
-│  │Tray  │ │Downloads │ │Context Menu   │   │
-│  └──────┘ └──────────┘ └───────────────┘   │
-├─────────────────────────────────────────────┤
-│       Native Platform Layer                 │
-│  WebView2 · WKWebView · GTK · Android WV   │
-└─────────────────────────────────────────────┘
+```rs
+┌────────────────────────────────────────────────┐
+│                    WebView                     │
+│    (rule34video.com + injected JS scripts)     │
+├────────────────────────────────────────────────┤
+│              Tauri Bridge (IPC)                │
+│     check_url_blocked · get_page_cosmetic_     │
+│     open_child_window · postMessage · etc.     │
+├────────────────────────────────────────────────┤
+│              Rust Backend                      │
+│  ┌────────┐ ┌────────────┐ ┌───────────────┐   │
+│  │Adblock │ │Navigation  │ │Child Windows  │   │
+│  ├────────┤ ├────────────┤ ├───────────────┤   │
+│  │Tray    │ │Downloads   │ │Context Menu   │   │
+│  └────────┘ └────────────┘ └───────────────┘   │
+├────────────────────────────────────────────────┤
+│  Native Platform Layer                         │
+│  WebView2 · WKWebView · GTK · Android WV       │
+└────────────────────────────────────────────────┘
 ```
 
 ---
