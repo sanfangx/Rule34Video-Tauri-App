@@ -1,11 +1,11 @@
 name: Build iOS IPA (TrollStore)
 
 on:
-  workflow_dispatch: # 支持手动触发
+  workflow_dispatch:
 
 jobs:
   build-ios:
-    runs-on: macos-14 # 使用 M 系列芯片环境提升编译速度
+    runs-on: macos-14
 
     steps:
       - name: Checkout code
@@ -14,29 +14,31 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          # 必须添加 iOS 交叉编译目标
-          targets: aarch64-apple-ios 
+          targets: aarch64-apple-ios
 
       - name: Install Tauri CLI
-        # 抛弃 npm，直接使用 Rust 包管理器全局安装 tauri 命令行工具
         run: cargo install tauri-cli --locked
 
       - name: Generate iOS Xcode Project
-        # 触发底层代码生成 gen/apple 目录
-        # 即使提示已经初始化也会继续往下走
         run: cargo tauri ios init
         continue-on-error: true
 
+      - name: Switch to Xcode 16
+        # 强制将 GitHub Actions 的编译环境从默认的 Xcode 15 升级到 Xcode 16
+        run: |
+          LATEST_XCODE_16=$(ls -d /Applications/Xcode_16*.app | sort -V | tail -n 1)
+          echo "Switching to $LATEST_XCODE_16"
+          sudo xcode-select -s "$LATEST_XCODE_16/Contents/Developer"
+
       - name: Build Unsigned App
-        # 直接接管 Xcode 编译，关闭所有签名校验并强制输出到本地 build 目录
         run: |
           cd src-tauri/gen/apple
           
-          # 动态抓取 Xcode 工程名称
+          # 动态获取工程名称
           PROJECT_NAME=$(ls | grep '\.xcodeproj' | sed 's/\.xcodeproj//' | head -n 1)
-          
           echo "Starting build for $PROJECT_NAME..."
           
+          # 执行免签编译，并将产物输出到当前目录的 build 文件夹
           xcodebuild build \
             -project "$PROJECT_NAME.xcodeproj" \
             -scheme "$PROJECT_NAME" \
@@ -51,10 +53,7 @@ jobs:
 
       - name: Package into IPA
         run: |
-          # 进入刚刚指定的 SYMROOT 输出目录
           cd src-tauri/gen/apple/build/Release-iphoneos
-          
-          # 按照苹果规范创建 Payload 目录并压缩打包
           mkdir -p Payload
           mv *.app Payload/
           zip -qr ../../../../../Rule34Video.ipa Payload
