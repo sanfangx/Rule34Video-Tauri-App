@@ -1,40 +1,41 @@
 name: Build iOS IPA (TrollStore)
 
 on:
-  workflow_dispatch: # 允许在 Actions 页面手动点击运行
+  workflow_dispatch: # 支持手动触发
 
 jobs:
   build-ios:
-    runs-on: macos-14 # 使用较新的 macOS 镜像和 M 芯片架构提升编译速度
+    runs-on: macos-14 # 使用 M 系列芯片环境提升编译速度
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-ios
+          # 必须添加 iOS 交叉编译目标
+          targets: aarch64-apple-ios 
 
-      - name: Install Frontend Dependencies
-        run: |
-          npm install # 如果原项目使用的是 pnpm/yarn，请替换为对应的安装命令
-          npm install -g @tauri-apps/cli@next
+      - name: Install Tauri CLI
+        # 抛弃 npm，直接使用 Rust 包管理器全局安装 tauri 命令行工具
+        run: cargo install tauri-cli --locked
 
-      - name: Initialize Tauri iOS Project
-        run: tauri ios init
+      - name: Generate iOS Xcode Project
+        # 触发底层代码生成 gen/apple 目录
+        # 即使提示已经初始化也会继续往下走
+        run: cargo tauri ios init
+        continue-on-error: true
 
       - name: Build Unsigned App
-        # 调用底层 xcodebuild 禁用所有签名要求，输出免签的 Release 版本
+        # 直接接管 Xcode 编译，关闭所有签名校验并强制输出到本地 build 目录
         run: |
           cd src-tauri/gen/apple
-          # 自动获取 Xcode 项目名称
+          
+          # 动态抓取 Xcode 工程名称
           PROJECT_NAME=$(ls | grep '\.xcodeproj' | sed 's/\.xcodeproj//' | head -n 1)
+          
+          echo "Starting build for $PROJECT_NAME..."
           
           xcodebuild build \
             -project "$PROJECT_NAME.xcodeproj" \
@@ -42,6 +43,7 @@ jobs:
             -configuration Release \
             -sdk iphoneos \
             -arch arm64 \
+            SYMROOT="$(pwd)/build" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
@@ -49,13 +51,16 @@ jobs:
 
       - name: Package into IPA
         run: |
+          # 进入刚刚指定的 SYMROOT 输出目录
           cd src-tauri/gen/apple/build/Release-iphoneos
+          
+          # 按照苹果规范创建 Payload 目录并压缩打包
           mkdir -p Payload
           mv *.app Payload/
-          zip -qr ../../../../../Rule34Video-Tauri.ipa Payload
+          zip -qr ../../../../../Rule34Video.ipa Payload
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Rule34Video-Tauri-iOS-TrollStore
-          path: Rule34Video-Tauri.ipa
+          path: Rule34Video.ipa
