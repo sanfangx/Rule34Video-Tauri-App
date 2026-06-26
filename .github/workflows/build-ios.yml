@@ -1,0 +1,61 @@
+name: Build iOS IPA (TrollStore)
+
+on:
+  workflow_dispatch: # 允许在 Actions 页面手动点击运行
+
+jobs:
+  build-ios:
+    runs-on: macos-14 # 使用较新的 macOS 镜像和 M 芯片架构提升编译速度
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Install Frontend Dependencies
+        run: |
+          npm install # 如果原项目使用的是 pnpm/yarn，请替换为对应的安装命令
+          npm install -g @tauri-apps/cli@next
+
+      - name: Initialize Tauri iOS Project
+        run: tauri ios init
+
+      - name: Build Unsigned App
+        # 调用底层 xcodebuild 禁用所有签名要求，输出免签的 Release 版本
+        run: |
+          cd src-tauri/gen/apple
+          # 自动获取 Xcode 项目名称
+          PROJECT_NAME=$(ls | grep '\.xcodeproj' | sed 's/\.xcodeproj//' | head -n 1)
+          
+          xcodebuild build \
+            -project "$PROJECT_NAME.xcodeproj" \
+            -scheme "$PROJECT_NAME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -arch arm64 \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES
+
+      - name: Package into IPA
+        run: |
+          cd src-tauri/gen/apple/build/Release-iphoneos
+          mkdir -p Payload
+          mv *.app Payload/
+          zip -qr ../../../../../Rule34Video-Tauri.ipa Payload
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Rule34Video-Tauri-iOS-TrollStore
+          path: Rule34Video-Tauri.ipa
